@@ -1,0 +1,9 @@
+[project]
+name = "fasthtml-humanreactiontest"
+version = "0.1.0"
+description = "FastHTML game to test human reaction speed with clicking on downwards arrow"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "python-fasthtml>=0.12.28",
+]
