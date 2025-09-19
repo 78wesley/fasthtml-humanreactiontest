@@ -1,10 +1,10 @@
 from fasthtml.common import *
 import random
 
-app = FastHTML(hdrs=(picocondlink,), htmx=True)
+app = FastHTML(hdrs=(picolink), htmx=True, debug=True)
 
-ROWS = 1
-COLS = 5
+ROWS = 4
+COLS = 10
 TIME_LIMIT = 2.0
 ROUNDS_TO_WIN = 5
 COUNTDOWN = 5
@@ -40,43 +40,115 @@ def index():
         Div(
             Header(H1("Reaction Speed Test", cls="contrast"), id="title-section"),
             Section(
-                P("Find the downward arrow as fast as you can.", id="instruction"),
-                Button(
-                    "Start Test",
-                    cls="primary",
-                    id="start-button",
-                    **{
-                        "hx-get": "/countdown",
-                        "hx-target": "#grid",
-                        "hx-swap": "innerHTML",
-                    },
+                H2("Settings"),
+                Form(
+                    Label("Rows"),
+                    Input(type="number", name="rows", value=ROWS, min=1, required=True),
+                    Label("Columns"),
+                    Input(type="number", name="cols", value=COLS, min=1, required=True),
+                    Label("Time Limit (seconds)"),
+                    Input(
+                        type="number",
+                        step="0.1",
+                        name="time_limit",
+                        value=TIME_LIMIT,
+                        min=0.5,
+                        required=True,
+                    ),
+                    Label("Rounds to Win"),
+                    Input(
+                        type="number",
+                        name="rounds",
+                        value=ROUNDS_TO_WIN,
+                        min=1,
+                        required=True,
+                    ),
+                    Label("Countdown Before Start (seconds)"),
+                    Input(
+                        type="number",
+                        name="countdown",
+                        value=COUNTDOWN,
+                        min=0,
+                        required=True,
+                    ),
+                    Label("Cooldown Between Rounds (ms)"),
+                    Input(
+                        type="number",
+                        name="cooldown",
+                        value=COOLDOWN,
+                        min=0,
+                        required=True,
+                    ),
+                    Button(
+                        "Save & Start Test",
+                        cls="primary",
+                        type="submit",
+                        **{
+                            "hx-post": "/configure",
+                            "hx-target": "#grid",
+                            "hx-swap": "innerHTML",
+                        },
+                    ),
                 ),
+                id="settings",
             ),
             Div(id="status"),
             Div(id="grid"),
             Div(id="result", style="margin-top:1rem;white-space:pre-line;"),
+            # <-- important: make select_cell available globally so onclick handlers work
             Script(
                 """
                 window.select_cell = function(i){
                     if(window.clicked) return;
                     window.clicked = true;
-                    let elapsed = (performance.now() - window.reactionStart)/1000;
+                    if(window.timeoutHandle) { clearTimeout(window.timeoutHandle); window.timeoutHandle = undefined; }
+                    let elapsed = (performance.now() - (window.reactionStart || performance.now()))/1000;
+                    // send elapsed to server
                     htmx.ajax('GET', '/select?cell='+i+'&elapsed='+elapsed, {target:'#grid', swap:'innerHTML'});
                 }
                 """
             ),
-        )
+        ),
+        cls="container",
     )
 
 
+@app.post("/configure")
+def configure(
+    rows: int, cols: int, time_limit: float, rounds: int, countdown: int, cooldown: int
+):
+    global ROWS, COLS, TIME_LIMIT, ROUNDS_TO_WIN, COUNTDOWN, COOLDOWN
+    ROWS = int(rows)
+    COLS = int(cols)
+    TIME_LIMIT = float(time_limit)
+    ROUNDS_TO_WIN = int(rounds)
+    COUNTDOWN = int(countdown)
+    COOLDOWN = int(cooldown)
+
+    reset_game()
+
+    # Hide settings/title immediately when starting from the settings form, then start countdown.
+    hide_settings = Script(
+        "var s=document.getElementById('settings'); if(s) s.style.display='none';"
+        "var t=document.getElementById('title-section'); if(t) t.style.display='none';"
+        "var instr=document.getElementById('instruction'); if(instr) instr.style.display='none';"
+        "var sb=document.getElementById('start-button'); if(sb) sb.style.display='none';"
+    )
+    return Section(hide_settings, countdown_route())
+
+
 @app.get("/countdown")
-def countdown():
+def countdown_route():
+    # Prepare a new target for the upcoming round
     reset_round()
+
     clear_result = Script("document.getElementById('result').innerHTML='';")
+    # Ensure settings/title are hidden when countdown appears (useful when countdown is triggered mid-session)
     hide_title = Script(
-        "document.getElementById('title-section').style.display='none';"
-        "document.getElementById('instruction').style.display='none';"
-        "document.getElementById('start-button').style.display='none';"
+        "var s=document.getElementById('settings'); if(s) s.style.display='none';"
+        "var t=document.getElementById('title-section'); if(t) t.style.display='none';"
+        "var instr=document.getElementById('instruction'); if(instr) instr.style.display='none';"
+        "var sb=document.getElementById('start-button'); if(sb) sb.style.display='none';"
     )
     countdown_div = Div(
         f"Starting in {COUNTDOWN}...",
@@ -87,10 +159,13 @@ def countdown():
         f"""
         var counter = {COUNTDOWN};
         var countdownElem = document.getElementById('countdown');
+        // show initial value immediately
+        countdownElem.innerText = 'Starting in ' + counter + '...';
         var interval = setInterval(function(){{
             counter--;
             if(counter <= 0){{
                 clearInterval(interval);
+                // start the round (replace #grid with the start view)
                 htmx.ajax('GET', '/start', {{target:'#grid', swap:'innerHTML'}});
                 countdownElem.remove();
             }} else {{
@@ -104,19 +179,24 @@ def countdown():
 
 @app.get("/start")
 def start():
+    # choose a new target at round start
     reset_round()
     buttons = []
     for i in range(ROWS * COLS):
         arrow = "⬇️" if i == state["target"] else "⬆️"
         buttons.append(
-            Button(arrow, cls="secondary outline", **{"onclick": f"select_cell({i})"})
+            Button(
+                arrow,
+                style="padding: 0;font-size: 4em;margin: 0;border: 0; background: none;",
+                **{"onclick": f"select_cell({i})"},
+            )
         )
 
     grid_div = Div(
         *buttons,
         id="button-grid",
         cls="grid",
-        style=f"display:grid; grid-template-columns:repeat({COLS},1fr); gap:0.5rem; justify-items:center;",
+        style=f"display:grid; grid-template-columns:repeat({COLS},1fr); gap:0.2rem; justify-items:center;",
     )
     status = P(
         f"Round {state['round']+1} of {ROUNDS_TO_WIN} · Success: {state['success']}",
@@ -130,10 +210,12 @@ def start():
 
     js = Script(
         f"""
+        // start timing for this round
         window.reactionStart = performance.now();
         window.clicked = false;
         if(window.timeoutHandle) clearTimeout(window.timeoutHandle);
         window.timeoutHandle = setTimeout(function(){{
+            // timeout => act like the user selected -1
             window.select_cell(-1);
         }}, {int(TIME_LIMIT*1000)});
         """
@@ -173,15 +255,17 @@ def select(cell: int, elapsed: float):
 
     if state["round"] >= ROUNDS_TO_WIN:
         results_text = "\n".join(state["results"])
+        # reload page on restart so settings reappear cleanly
         return Section(
             H2("🎉 Test Complete!"),
             P(f"You got {state['success']} out of {ROUNDS_TO_WIN} correct."),
+            P(f"Total fails: {ROUNDS_TO_WIN - state['success']}."),
             Pre(results_text),
             Div(
                 Button(
                     "Restart Test",
                     cls="primary",
-                    **{"hx-get": "/", "hx-target": "#grid", "hx-swap": "innerHTML"},
+                    **{"onclick": "window.location.href='/'"},
                 )
             ),
         )
